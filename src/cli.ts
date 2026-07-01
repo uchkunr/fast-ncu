@@ -49,6 +49,22 @@ function colorizeVersionDiff(current: string, upgrade: string, type: 'major' | '
   return `${pc.gray(current)}  →  ${upgrade}`;
 }
 
+function detectPackageManager(): string {
+  const cwd = process.cwd();
+  if (fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (fs.existsSync(path.join(cwd, 'yarn.lock'))) return 'yarn';
+  if (fs.existsSync(path.join(cwd, 'bun.lockb')) || fs.existsSync(path.join(cwd, 'bun.lock'))) return 'bun';
+  if (fs.existsSync(path.join(cwd, 'package-lock.json'))) return 'npm';
+
+  // Check user agent if lockfiles are missing (e.g. running global/npx)
+  const userAgent = process.env.npm_config_user_agent || '';
+  if (userAgent.includes('pnpm')) return 'pnpm';
+  if (userAgent.includes('yarn')) return 'yarn';
+  if (userAgent.includes('bun')) return 'bun';
+
+  return 'npm';
+}
+
 async function main() {
   const args = process.argv.slice(2);
   
@@ -149,7 +165,8 @@ async function main() {
       }
 
       fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgContent, null, 2) + '\n', 'utf8');
-      console.log(pc.green(`Upgraded package.json successfully! Run ${pc.cyan('npm install')} to apply changes.`));
+      const pm = detectPackageManager();
+      console.log(pc.green(`Upgraded package.json successfully! Run ${pc.cyan(`${pm} install`)} to apply changes.`));
     } else {
       console.log(`Run ${pc.cyan('npx fast-ncu -u')} to upgrade package.json.`);
     }

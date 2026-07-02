@@ -47,7 +47,11 @@ Most developers don't realize how much overhead goes into checking package versi
 Run it on the fly using `npx`:
 
 ```bash
+# Using fast-ncu
 npx fast-ncu
+
+# Or using the shorthand alias
+npx fncu
 ```
 
 Or install globally:
@@ -56,22 +60,26 @@ Or install globally:
 npm install -g fast-ncu
 ```
 
+Once globally installed, you can use the command `fast-ncu` or its convenient shorthand `fncu`.
+
 ---
 
 ## 🚀 Usage
 
+You can use the full name `fast-ncu` or the shorter shorthand `fncu` interchangeably:
+
 ```bash
 # Check dependencies for updates (Safe - read only)
-fast-ncu
+fncu
 
 # Overwrite package.json with the upgraded versions
-fast-ncu -u
+fncu -u
 
 # Maximize speed by raising concurrency
-fast-ncu --concurrency 30
+fncu --concurrency 30
 
 # Force bypass the cache
-fast-ncu --no-cache
+fncu --no-cache
 ```
 
 ## ⚙️ Options
@@ -79,7 +87,7 @@ fast-ncu --no-cache
 *   `-u, --upgrade`          Overwrite package.json with upgraded versions
 *   `--concurrency <num>`    Number of concurrent registry requests (default: 15)
 *   `--no-cache`             Disable local caching
-*   `-v, --version`          Show version of fast-ncu
+*   `-v, --version`          Show version of fast-ncu / fncu
 *   `-h, --help`             Show help
 
 ## 🧪 Tests

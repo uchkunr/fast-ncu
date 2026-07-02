@@ -1,11 +1,12 @@
 {
   "name": "fast-ncu",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "An extremely fast alternative to npm-check-updates",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "fast-ncu": "dist/cli.js"
+    "fast-ncu": "dist/cli.js",
+    "fncu": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

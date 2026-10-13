@@ -1,104 +1,51 @@
-# ⚡ fast-ncu
+# fast-ncu
 
-An extremely fast, lightweight, and zero-configuration alternative to **npm-check-updates (ncu)**. It checks your `package.json` dependencies against the npm registry concurrently and upgrades them to the latest versions.
+[![npm](https://img.shields.io/npm/v/fast-ncu.svg)](https://www.npmjs.com/package/fast-ncu)
+[![license](https://img.shields.io/npm/l/fast-ncu.svg)](LICENSE)
 
-🚀 **More than 3x faster than the original `npm-check-updates` on cold runs, and up to 300x faster on cached runs!**
+A small, fast alternative to [npm-check-updates](https://github.com/raineorshine/npm-check-updates) for the
+everyday case: find the latest version of every dependency in `package.json` and bump it.
 
-[![npm version](https://img.shields.io/npm/v/fast-ncu.svg?style=flat)](https://www.npmjs.com/package/fast-ncu)
-[![TypeScript](https://img.shields.io/badge/TypeScript-%23007ACC.svg?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![license](https://img.shields.io/npm/l/fast-ncu.svg?style=flat)](https://github.com/uchkunr/fast-ncu/blob/master/LICENSE)
+![fncu lists available upgrades, writes them to package.json from the cache, then reports the project is up to date](https://raw.githubusercontent.com/uchkunr/fast-ncu/master/media/demo.gif)
 
----
-
-## ⚡ Performance Comparison (Benchmark)
-
-Tested on a repository containing **78 dependencies** (the `npm-check-updates` codebase itself):
-
-| Tool | Concurrency | Cache | Time (Seconds) | Speedup |
-| :--- | :--- | :--- | :--- | :--- |
-| 🐢 **Original `ncu`** | Default | N/A | `2.75s` | *Baseline* |
-| ⚡ **`fast-ncu` (Cold)** | `15` (Default) | Disabled | `2.70s` | `1.0x` |
-| 🚀 **`fast-ncu` (Cold)** | `30` | Disabled | **`0.88s`** | **3.1x faster** |
-| 🛸 **`fast-ncu` (Warm)** | `30` | Enabled (Hit) | **`0.01s`** (10ms) | **275x faster** |
-
----
-
-## 🛠️ How it works (Why it's so fast)
-
-Most developers don't realize how much overhead goes into checking package versions. Here is how `fast-ncu` achieves extreme performance:
-
-### 1. Tiny payloads via `/latest` CDN Edge Endpoint
-*   **The Problem:** Normal tools query `https://registry.npmjs.org/<pkg>` which returns the full package metadata (all historical versions, SHAs, dates, and readmes). For packages like `typescript` or `aws-sdk`, this JSON can be **several megabytes**.
-*   **The Solution:** We query `https://registry.npmjs.org/<pkg>/latest`. This returns a tiny, CDN-cached JSON object containing only the latest version details (~2KB). Our benchmarks show that the `/latest` endpoint is **over 4x faster** to resolve than the standard packument endpoint.
-
-### 2. High-Performance Concurrency Limiter
-*   We developed an optimized, zero-dependency concurrency queue controller. It runs async HTTP requests in parallel with an adjustable limit (e.g. `--concurrency 30`), maximizing your network bandwidth without causing socket exhaustion or registry rate limits.
-
-### 3. Ultra-Fast Startup Time (ESM + Zero Bloat)
-*   By avoiding heavy CLI packages (like `yargs`, `commander`) and bulky utilities (like `chalk`), the entire Node.js runtime boots and prints output in **under 40ms**. We use native ES Modules and `picocolors` (which starts up instantly and has zero dependencies).
-
-### 4. Smart Local Caching Layer
-*   Subsequent runs are instantaneous. It safely stores the fetched versions in your system's temp directory (`/tmp/fast-ncu-cache.json`) for 5 minutes (configurable). A second run takes **10ms** to check any number of packages!
-
----
-
-## 📦 Installation
-
-Run it on the fly using `npx`:
-
-```bash
-# Using fast-ncu
-npx fast-ncu
-
-# Or using the shorthand alias
-npx fncu
-```
-
-Or install globally:
+## Install
 
 ```bash
 npm install -g fast-ncu
 ```
 
-Once globally installed, you can use the command `fast-ncu` or its convenient shorthand `fncu`.
+This gives you `fncu` (and the longer `fast-ncu`). Requires Node.js 18 or newer.
 
----
-
-## 🚀 Usage
-
-You can use the full name `fast-ncu` or the shorter shorthand `fncu` interchangeably:
+## Usage
 
 ```bash
-# Check dependencies for updates (Safe - read only)
-fncu
-
-# Overwrite package.json with the upgraded versions
-fncu -u
-
-# Maximize speed by raising concurrency
-fncu --concurrency 30
-
-# Force bypass the cache
-fncu --no-cache
+fncu      # list available upgrades
+fncu -u   # write them to package.json
 ```
 
-## ⚙️ Options
+`-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`), leaves `file:`, `workspace:`, git and `npm:`
+specifiers alone (they aren't sent to the registry at all), and tells you which package manager to run
+`install` with.
 
-*   `-u, --upgrade`          Overwrite package.json with upgraded versions
-*   `--concurrency <num>`    Number of concurrent registry requests (default: 15)
-*   `--no-cache`             Disable local caching
-*   `-v, --version`          Show version of fast-ncu / fncu
-*   `-h, --help`             Show help
+## Why it's faster
 
-## 🧪 Tests
+npm-check-updates downloads each package's packument, the document listing every version ever published.
+For `typescript` that's 8.7 MB, even in the abbreviated format npm clients use. fast-ncu only needs the
+`latest` dist-tag, so it requests `/<name>/latest` instead (4.8 KB), runs 30 of those requests in
+parallel and caches the results for 5 minutes.
 
-The project includes unit tests using Node's native test runner (zero external testing dependencies).
+On the npm-check-updates repository (78 dependencies), a cold run took 0.88 s against 2.75 s for ncu.
+The details are in [How I sped up npm-check-updates by 3x](https://uchkun.io/blog/speeding-up-npm-check-updates).
 
-To compile and run tests:
-```bash
-npm run build
-npm test
-```
+## Limitations
 
-## 📄 License
-MIT
+fast-ncu covers the common case. Use npm-check-updates if you need:
+
+- private registries: only registry.npmjs.org is queried and `.npmrc` isn't read
+- targets other than `latest`, filters or pre-release channels
+- workspaces, `peerDependencies` or `optionalDependencies`
+- compound ranges kept intact: `>=1.0.0 <2.0.0`, `1.x` and `^4.0.0 || ^5.0.0` collapse to a single version
+
+## License
+
+[MIT](LICENSE)

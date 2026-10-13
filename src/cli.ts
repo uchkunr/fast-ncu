@@ -170,8 +170,10 @@ async function main() {
         }
       }
       fs.writeFileSync(file, serializeLike(text, manifest));
-      const install = cyan(`${packageManager()} install`);
-      console.log(`\n${green("Updated.")} Run ${install} ${time}`);
+      const next = options.install
+        ? ""
+        : ` Run ${cyan(`${packageManager()} install`)}`;
+      console.log(`\n${green("Updated.")}${next} ${time}`);
     } else {
       console.log(`\nRun ${cyan("fncu -u")} to upgrade ${time}`);
     }
@@ -204,11 +206,12 @@ async function main() {
   if (options.install && upgrades.length > 0) {
     const pm = packageManager();
     console.log(`\n${cyan(`> ${pm} install`)}\n`);
-    // pm comes from a fixed list, so a shell (needed for npm.cmd & co. on Windows) is safe.
-    const { status, error } = spawnSync(pm, ["install"], {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    });
+    // Windows needs a shell to run npm.cmd & co.; one fixed command string (not
+    // args, which Node warns about) is safe because pm comes from a fixed list.
+    const { status, error } =
+      process.platform === "win32"
+        ? spawnSync(`${pm} install`, { stdio: "inherit", shell: true })
+        : spawnSync(pm, ["install"], { stdio: "inherit" });
     if (error) {
       console.error(red(`Couldn't run ${pm} install: ${error.message}`));
       process.exitCode = 1;

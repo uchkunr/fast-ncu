@@ -1,9 +1,12 @@
 /// <reference types="bun" />
 import { expect, test } from "bun:test";
-import { advise } from "./advice.js";
+import { advise, type Project } from "./advice.js";
 import type { DependencyInfo } from "./index.js";
 import { releaseNotesUrl, repositoryUrl } from "./links.js";
 import type { VersionInfo } from "./types.js";
+
+const messages = (d: DependencyInfo[], p: Project) =>
+  advise(d, p).map((a) => a.message);
 
 const upgrade = (name: string, meta: VersionInfo): DependencyInfo => ({
   name,
@@ -18,20 +21,20 @@ test("warns when the new version needs a Node the project's engines don't guaran
   const details = [
     upgrade("express", { version: "5.3.0", engines: { node: ">=18" } }),
   ];
-  expect(advise(details, { ranges: {}, nodeRange: ">=16" })).toEqual([
+  expect(messages(details, { ranges: {}, nodeRange: ">=16" })).toEqual([
     "express 5.3.0 needs Node >=18; your engines allow >=16",
   ]);
-  expect(advise(details, { ranges: {}, nodeRange: ">=20" })).toEqual([]);
+  expect(messages(details, { ranges: {}, nodeRange: ">=20" })).toEqual([]);
 });
 
 test("falls back to the running Node when the project declares no engines", () => {
   const details = [
     upgrade("express", { version: "5.3.0", engines: { node: ">=18" } }),
   ];
-  expect(advise(details, { ranges: {}, nodeVersion: "16.20.0" })).toEqual([
+  expect(messages(details, { ranges: {}, nodeVersion: "16.20.0" })).toEqual([
     "express 5.3.0 needs Node >=18; you run 16.20.0",
   ]);
-  expect(advise(details, { ranges: {}, nodeVersion: "20.11.0" })).toEqual([]);
+  expect(messages(details, { ranges: {}, nodeVersion: "20.11.0" })).toEqual([]);
 });
 
 test("warns when a peer dependency won't be satisfied after the upgrade", () => {
@@ -42,11 +45,11 @@ test("warns when a peer dependency won't be satisfied after the upgrade", () => 
     }),
   ];
   expect(
-    advise(details, { ranges: { react: "^18.3.1", "react-dom": "^19.3.0" } }),
+    messages(details, { ranges: { react: "^18.3.1", "react-dom": "^19.3.0" } }),
   ).toEqual(["react-dom 19.3.0 wants react ^19.3.0; you'd have ^18.3.1"]);
   // react is upgraded too: the post-upgrade range satisfies the peer
   expect(
-    advise(details, { ranges: { react: "^19.3.0", "react-dom": "^19.3.0" } }),
+    messages(details, { ranges: { react: "^19.3.0", "react-dom": "^19.3.0" } }),
   ).toEqual([]);
 });
 
@@ -58,7 +61,7 @@ test("ignores optional peers and peers the project doesn't have", () => {
       peerDependenciesMeta: { typescript: { optional: true } },
     }),
   ];
-  expect(advise(details, { ranges: { typescript: "^4.0.0" } })).toEqual([]);
+  expect(messages(details, { ranges: { typescript: "^4.0.0" } })).toEqual([]);
 });
 
 test("mentions deprecated versions, first line only", () => {
@@ -68,7 +71,7 @@ test("mentions deprecated versions, first line only", () => {
       deprecated: "request has been deprecated\nsee issue",
     }),
   ];
-  expect(advise(details, { ranges: {} })).toEqual([
+  expect(messages(details, { ranges: {} })).toEqual([
     "request 2.88.2 is deprecated: request has been deprecated",
   ]);
 });
@@ -80,7 +83,7 @@ test("says nothing about packages that aren't being upgraded", () => {
       upgradeVersion: null,
     },
   ];
-  expect(advise(details, { ranges: {}, nodeVersion: "20.0.0" })).toEqual([]);
+  expect(messages(details, { ranges: {}, nodeVersion: "20.0.0" })).toEqual([]);
 });
 
 test("normalises the many shapes of repository URLs", () => {

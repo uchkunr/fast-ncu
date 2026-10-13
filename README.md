@@ -22,6 +22,7 @@ too. Requires Node.js 20 or newer, or Bun. The package has no runtime dependenci
 ```bash
 fncu                   # list available upgrades
 fncu -u                # write them to package.json
+fncu -i                # pick which ones to write, in the terminal
 fncu -u --minor        # only upgrades that stay within the current major
 fncu --patch           # only patch releases within the current minor
 fncu react react-dom   # only these packages (names may use *, e.g. @types/*)
@@ -39,6 +40,9 @@ already downloaded:
 - a peer dependency that the upgrade wants but your ranges won't satisfy, e.g. `react-dom` 19 next to
   `react` 18
 - versions that have been deprecated
+
+In interactive mode (`-i`) the safe upgrades start ticked and the breaking ones, plus anything with a
+heads-up, start unticked; you choose, press Enter, and only those are written.
 
 `-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`, `1.x` becomes `2.x`), follows `npm:` aliases
 to the real package, leaves `file:`, `workspace:` and git specifiers alone (they aren't sent to the

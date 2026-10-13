@@ -15,29 +15,34 @@ export interface Project {
  * deprecated versions, Node requirements the project doesn't meet, and peer
  * dependencies that the project's (post-upgrade) ranges don't satisfy.
  */
-export function advise(details: DependencyInfo[], project: Project): string[] {
-  const notes: string[] = [];
+export interface Advice {
+  /** The dependency the message is about. */
+  name: string;
+  message: string;
+}
+
+export function advise(details: DependencyInfo[], project: Project): Advice[] {
+  const notes: Advice[] = [];
 
   for (const d of details) {
     if (!d.upgradeVersion || !d.meta) continue;
     const label = `${d.name} ${d.meta.version}`;
+    const note = (message: string) => notes.push({ name: d.name, message });
 
     if (d.meta.deprecated) {
-      notes.push(`${label} is deprecated: ${firstLine(d.meta.deprecated)}`);
+      note(`${label} is deprecated: ${firstLine(d.meta.deprecated)}`);
     }
 
     const node = d.meta.engines?.node;
     if (node && validRange(node)) {
       if (project.nodeRange && validRange(project.nodeRange)) {
         if (!subset(project.nodeRange, node)) {
-          notes.push(
+          note(
             `${label} needs Node ${node}; your engines allow ${project.nodeRange}`,
           );
         }
       } else if (project.nodeVersion && !satisfies(project.nodeVersion, node)) {
-        notes.push(
-          `${label} needs Node ${node}; you run ${project.nodeVersion}`,
-        );
+        note(`${label} needs Node ${node}; you run ${project.nodeVersion}`);
       }
     }
 
@@ -46,7 +51,7 @@ export function advise(details: DependencyInfo[], project: Project): string[] {
       const have = project.ranges[peer];
       if (!have || !validRange(have) || !validRange(range)) continue;
       if (!intersects(have, range)) {
-        notes.push(`${label} wants ${peer} ${range}; you'd have ${have}`);
+        note(`${label} wants ${peer} ${range}; you'd have ${have}`);
       }
     }
   }

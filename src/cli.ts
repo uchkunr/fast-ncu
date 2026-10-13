@@ -7,6 +7,7 @@ import { version } from "../package.json";
 import { advise } from "./advice.js";
 import { selectDependencies } from "./filter.js";
 import { checkUpdates, type DependencyInfo, type Target } from "./index.js";
+import { pick } from "./interactive.js";
 import { releaseNotesUrl } from "./links.js";
 
 // The usual rules: NO_COLOR disables, FORCE_COLOR overrides, otherwise only on a TTY.
@@ -28,12 +29,13 @@ const HELP = `${bold("fncu")}: find newer versions of your dependencies
 
   fncu [packages...] [options]     names may use *, e.g. @types/* or eslint*
 
-  -u, --upgrade    write upgrades to package.json
-      --minor      stay within the current major: no breaking changes
-      --patch      stay within the current minor
-      --install    upgrade, then run the package manager's install
-  -v, --version    print version
-  -h, --help       print help`;
+  -u, --upgrade      write upgrades to package.json
+  -i, --interactive  pick which upgrades to write
+      --minor        stay within the current major: no breaking changes
+      --patch        stay within the current minor
+      --install      upgrade, then run the package manager's install
+  -v, --version      print version
+  -h, --help         print help`;
 
 const DEP_FIELDS = ["dependencies", "devDependencies"] as const;
 const ORDER = { major: 0, minor: 1, patch: 2, none: 3 };
@@ -59,6 +61,7 @@ function parseOptions() {
       allowPositionals: true,
       options: {
         upgrade: { type: "boolean", short: "u" },
+        interactive: { type: "boolean", short: "i" },
         minor: { type: "boolean" },
         patch: { type: "boolean" },
         install: { type: "boolean" },
@@ -117,6 +120,17 @@ function printTable(rows: DependencyInfo[]) {
   console.log(border("└", "┴", "┘"));
 }
 
+// One aligned line per upgrade for the interactive picker.
+function pickerLabels(rows: DependencyInfo[]): string[] {
+  const name = Math.max(...rows.map((d) => d.name.length));
+  const current = Math.max(...rows.map((d) => d.currentRange.length));
+  return rows.map((d) => {
+    const color = COLOR[d.diffType];
+    const arrow = `${gray(d.currentRange.padEnd(current))} → ${color(d.upgradeVersion!)}`;
+    return `${cyan(d.name.padEnd(name))}  ${arrow}  ${color(d.diffType)}`;
+  });
+}
+
 async function main() {
   const { values: options, positionals: patterns } = parseOptions();
   if (options.help) return console.log(HELP);
@@ -126,7 +140,7 @@ async function main() {
     : options.minor
       ? "minor"
       : "latest";
-  const upgrade = options.upgrade || options.install;
+  const write = options.upgrade || options.interactive || options.install;
 
   const file = "package.json";
   if (!fs.existsSync(file)) fail("No package.json here");
@@ -161,22 +175,7 @@ async function main() {
   const time = dim(`${result.stats.timeMs}ms`);
 
   if (upgrades.length > 0) {
-    printTable(upgrades);
-    if (upgrade) {
-      for (const field of DEP_FIELDS) {
-        for (const name of Object.keys(manifest[field] ?? {})) {
-          if (result.upgraded[name])
-            manifest[field]![name] = result.upgraded[name];
-        }
-      }
-      fs.writeFileSync(file, serializeLike(text, manifest));
-      const next = options.install
-        ? ""
-        : ` Run ${cyan(`${packageManager()} install`)}`;
-      console.log(`\n${green("Updated.")}${next} ${time}`);
-    } else {
-      console.log(`\nRun ${cyan("fncu -u")} to upgrade ${time}`);
-    }
+    if (!options.interactive) printTable(upgrades); // the picker lists them instead
   } else if (!allFailed) {
     const scope = target === "latest" ? "" : ` within --${target}`;
     console.log(
@@ -207,7 +206,7 @@ async function main() {
   });
   if (notes.length > 0) {
     console.log(`\n${yellow("Heads-up:")}`);
-    for (const note of notes) console.log(`  ${note}`);
+    for (const note of notes) console.log(`  ${note.message}`);
   }
 
   if (heldBack.length > 0) {
@@ -226,8 +225,51 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  if (upgrades.length === 0) return;
 
-  if (options.install && upgrades.length > 0) {
+  let selected = upgrades;
+  if (options.interactive) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      fail("Interactive mode needs a terminal");
+    }
+    // Safe by default: breaking changes and anything with a heads-up start unticked.
+    const flagged = new Set(notes.map((n) => n.name));
+    const labels = pickerLabels(upgrades);
+    console.log();
+    const ticked = await pick(
+      upgrades.map((d, i) => ({
+        label: labels[i]!,
+        checked: d.diffType !== "major" && !flagged.has(d.name),
+      })),
+      { highlight: bold, dim },
+    );
+    if (ticked === null) return console.log(dim("Nothing changed."));
+    selected = upgrades.filter((_, i) => ticked[i]);
+    if (selected.length === 0) return console.log(dim("Nothing selected."));
+  }
+
+  if (!write) {
+    return console.log(`\nRun ${cyan("fncu -u")} to upgrade ${time}`);
+  }
+
+  const chosen = new Map(selected.map((d) => [d.name, d.upgradeVersion!]));
+  for (const field of DEP_FIELDS) {
+    for (const name of Object.keys(manifest[field] ?? {})) {
+      const next = chosen.get(name);
+      if (next) manifest[field]![name] = next;
+    }
+  }
+  fs.writeFileSync(file, serializeLike(text, manifest));
+  const what =
+    selected.length === upgrades.length
+      ? ""
+      : ` ${selected.length} of ${upgrades.length}`;
+  const next = options.install
+    ? ""
+    : ` Run ${cyan(`${packageManager()} install`)}`;
+  console.log(`\n${green(`Updated${what}.`)}${next} ${time}`);
+
+  if (options.install) {
     const pm = packageManager();
     console.log(`\n${cyan(`> ${pm} install`)}\n`);
     // Windows needs a shell to run npm.cmd & co.; one fixed command string (not

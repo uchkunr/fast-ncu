@@ -96,7 +96,6 @@ test("never asks the registry about non-registry specifiers", async () => {
       local: "file:../lib",
       ws: "workspace:*",
       gh: "github:user/repo",
-      alias: "npm:debug@^3.0.0",
     },
     {},
   );
@@ -261,4 +260,45 @@ test("ignores a pre-release tagged as latest unless the range is on a pre-releas
   );
   expect(upgraded).toEqual({ beta: "^2.0.0-beta.3" });
   expect(details.find((d) => d.name === "stable")?.diffType).toBe("none");
+});
+
+test("turns compound ranges into a caret range, like npm-check-updates", async () => {
+  const { upgraded } = await run(
+    {
+      a: ">=4.0.0 <5.0.0",
+      b: "^5.0.0 || ^6.0.0",
+      c: "1.0.0 - 2.0.0",
+      d: ">= 1.0.0",
+    },
+    Object.fromEntries(["a", "b", "c", "d"].map((n) => [n, latest("7.0.2")])),
+  );
+  expect(upgraded).toEqual({
+    a: "^7.0.2",
+    b: "^7.0.2",
+    c: "^7.0.2",
+    d: ">= 7.0.2",
+  });
+});
+
+test("follows npm: aliases to the real package and keeps the alias", async () => {
+  const { calls, upgraded, details } = await run(
+    {
+      dbg: "npm:debug@^3.0.0",
+      types: "npm:@types/node@^18.0.0",
+      pinned: "npm:ms@*",
+    },
+    {
+      debug: latest("4.4.3"),
+      "@types/node": latest("20.0.0"),
+      ms: latest("2.1.3"),
+    },
+  );
+  expect(calls.sort()).toEqual(["@types/node", "debug"]);
+  expect(upgraded).toEqual({
+    dbg: "npm:debug@^4.4.3",
+    types: "npm:@types/node@^20.0.0",
+  });
+  expect(details.find((d) => d.name === "dbg")?.currentRange).toBe(
+    "npm:debug@^3.0.0",
+  );
 });

@@ -52,23 +52,24 @@ export async function checkUpdates(
   const details = await mapLimit(
     Object.entries(dependencies),
     CONCURRENCY,
-    async ([name, range]): Promise<DependencyInfo> => {
-      // file:, workspace:, git and npm: specifiers aren't registry versions,
-      // and a wildcard (*, x, "") already allows whatever is latest.
-      const normalized = validRange(range);
-      if (!normalized || normalized === "*") return unchanged(name, range);
+    async ([name, spec]): Promise<DependencyInfo> => {
+      const dep = resolveSpec(name, spec);
+      // file:, workspace: and git specifiers aren't registry versions, and a
+      // wildcard (*, x, "") already allows whatever is latest.
+      const normalized = validRange(dep.range);
+      if (!normalized || normalized === "*") return unchanged(name, spec);
 
-      const cached = cache.get(name);
+      const cached = cache.get(dep.lookupName);
       if (cached) {
         cacheHits++;
-        return { ...fromVersion(name, range, cached.version), fromCache: true };
+        return { ...fromVersion(dep, cached.version), fromCache: true };
       }
       try {
-        const version = await latestVersion(name);
-        cache.set(name, { version, checkedAt: Date.now() });
-        return fromVersion(name, range, version);
+        const version = await latestVersion(dep.lookupName);
+        cache.set(dep.lookupName, { version, checkedAt: Date.now() });
+        return fromVersion(dep, version);
       } catch (err) {
-        return { ...unchanged(name, range), error: (err as Error).message };
+        return { ...unchanged(name, spec), error: (err as Error).message };
       }
     },
   );
@@ -102,6 +103,25 @@ function defaultCache(registry?: string): VersionCache {
   }
 }
 
+interface Dep {
+  name: string;
+  spec: string; // as written in package.json
+  range: string; // the semver part of it
+  lookupName: string; // the package to ask the registry about
+  prefix: string; // put back in front of the rewritten range
+}
+
+// "npm:debug@^3.0.0" (or "npm:@scope/pkg@^1") aliases another package: that one
+// is looked up, and the alias prefix is kept on the rewritten range.
+const ALIAS = /^npm:((?:@[^/@]+\/)?[^@]+)@(.+)$/;
+
+function resolveSpec(name: string, spec: string): Dep {
+  const alias = spec.match(ALIAS);
+  if (!alias) return { name, spec, range: spec, lookupName: name, prefix: "" };
+  const [, target, range] = alias as unknown as [string, string, string];
+  return { name, spec, range, lookupName: target, prefix: `npm:${target}@` };
+}
+
 const unchanged = (name: string, currentRange: string): DependencyInfo => ({
   name,
   currentRange,
@@ -110,18 +130,22 @@ const unchanged = (name: string, currentRange: string): DependencyInfo => ({
   diffType: "none",
 });
 
-function fromVersion(
-  name: string,
-  currentRange: string,
-  latestVersion: string | null,
-): DependencyInfo {
+function fromVersion(dep: Dep, latestVersion: string | null): DependencyInfo {
   if (latestVersion === null) {
-    return { ...unchanged(name, currentRange), error: "not found" };
+    return { ...unchanged(dep.name, dep.spec), error: "not found" };
   }
-  const diffType = classify(currentRange, latestVersion);
+  const diffType = classify(dep.range, latestVersion);
   const upgradeVersion =
-    diffType === "none" ? null : rewriteRange(currentRange, latestVersion);
-  return { name, currentRange, latestVersion, upgradeVersion, diffType };
+    diffType === "none"
+      ? null
+      : dep.prefix + rewriteRange(dep.range, latestVersion);
+  return {
+    name: dep.name,
+    currentRange: dep.spec,
+    latestVersion,
+    upgradeVersion,
+    diffType,
+  };
 }
 
 // How far `latest` is beyond the lowest version the range allows.
@@ -145,12 +169,18 @@ function classify(range: string, latest: string): DependencyInfo["diffType"] {
 //   ^1.2.0 -> ^2.0.0   ~1.2.0 -> ~1.3.0   >=1.0.0 -> >=2.0.0   1.2.3 -> 2.0.0
 //   1.x -> 2.x   1.2.x -> 2.1.x   1 -> 2
 // A bare ">" would exclude the very version we're upgrading to, so it becomes ">=".
+// A range made of several comparators (">=4 <5", "^5 || ^6", "1.0.0 - 2.0.0") has
+// no single operator to keep, so it becomes a caret range, like npm-check-updates.
 function rewriteRange(range: string, version: string): string {
+  if (isCompound(range)) return `^${version}`;
   const xRange = rewriteXRange(range.trim(), version);
   if (xRange) return xRange;
   const prefix = range.match(/^[~^>=\s]+/)?.[0] ?? "";
   return prefix.replace(/^>(?!=)/, ">=") + version;
 }
+
+const isCompound = (range: string) =>
+  /\|\||\s+-\s+|\s+(?=[<>=~^])/.test(range.trim());
 
 // "1.x", "1.2.x", "1.*", "1", "1.2": keep the wildcard part, replace the numbers.
 function rewriteXRange(range: string, version: string): string | undefined {

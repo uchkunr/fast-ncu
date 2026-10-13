@@ -24,9 +24,9 @@ fncu      # list available upgrades
 fncu -u   # write them to package.json
 ```
 
-`-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`), leaves `file:`, `workspace:`, git and `npm:`
-specifiers alone (they aren't sent to the registry at all), and tells you which package manager to run
-`install` with.
+`-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`, `1.x` becomes `2.x`), follows `npm:` aliases
+to the real package, leaves `file:`, `workspace:` and git specifiers alone (they aren't sent to the
+registry at all), and tells you which package manager to run `install` with.
 
 ## Why it's faster
 
@@ -46,8 +46,8 @@ fast-ncu covers the common case. Use npm-check-updates if you need:
 - targets other than `latest`, filters or pre-release channels (a pre-release tagged `latest` is skipped
   unless your range is already on a pre-release)
 - workspaces, `peerDependencies` or `optionalDependencies`
-- compound ranges kept intact: `>=1.0.0 <2.0.0` and `^4.0.0 || ^5.0.0` collapse to a single bound
-  (`^`, `~`, `>=`, exact versions and x-ranges like `1.x` keep their shape)
+- compound ranges kept intact: `>=1.0.0 <2.0.0`, `1.0.0 - 2.0.0` and `^4.0.0 || ^5.0.0` become
+  `^latest` (`^`, `~`, `>=`, exact versions and x-ranges like `1.x` keep their shape)
 
 ## Development
 

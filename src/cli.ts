@@ -4,8 +4,10 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { parseArgs } from "node:util";
 import { version } from "../package.json";
+import { advise } from "./advice.js";
 import { selectDependencies } from "./filter.js";
 import { checkUpdates, type DependencyInfo, type Target } from "./index.js";
+import { releaseNotesUrl } from "./links.js";
 
 // The usual rules: NO_COLOR disables, FORCE_COLOR overrides, otherwise only on a TTY.
 const colors =
@@ -137,10 +139,8 @@ async function main() {
     fail(`Bad package.json: ${(err as Error).message}`);
   }
 
-  const deps = selectDependencies(
-    { ...manifest.dependencies, ...manifest.devDependencies },
-    patterns,
-  );
+  const all = { ...manifest.dependencies, ...manifest.devDependencies };
+  const deps = selectDependencies(all, patterns);
   if (Object.keys(deps).length === 0) {
     if (patterns.length > 0)
       fail(`No dependency matches ${patterns.join(", ")}`);
@@ -184,6 +184,30 @@ async function main() {
         ? `No upgrades${scope} (${failed.length} not checked) ${time}`
         : `${green(`Up to date${scope}`)} ${time}`,
     );
+  }
+
+  // Breaking changes are where people need the changelog; the manifest knows the repo.
+  const majors = upgrades.filter(
+    (d) => d.diffType === "major" && d.meta?.repository,
+  );
+  if (majors.length > 0) {
+    console.log(`\n${bold("Read before upgrading:")}`);
+    const width = Math.max(...majors.map((d) => d.name.length));
+    for (const d of majors) {
+      console.log(
+        `  ${cyan(d.name.padEnd(width))}  ${releaseNotesUrl(d.meta!.repository!)}`,
+      );
+    }
+  }
+
+  const notes = advise(result.details, {
+    ranges: { ...all, ...result.upgraded },
+    nodeRange: manifest.engines?.node,
+    nodeVersion: process.versions.node,
+  });
+  if (notes.length > 0) {
+    console.log(`\n${yellow("Heads-up:")}`);
+    for (const note of notes) console.log(`  ${note}`);
   }
 
   if (heldBack.length > 0) {

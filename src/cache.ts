@@ -1,11 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { PackageMeta } from "./types.js";
 
 export interface CacheEntry {
   /** `null` means the registry said the package doesn't exist. */
   version: string | null;
   checkedAt: number;
+  /** What the manifest said about that version (engines, peers, repository). */
+  meta?: PackageMeta;
 }
 
 export interface VersionCache {

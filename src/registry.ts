@@ -1,4 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { repositoryUrl } from "./links.js";
+import type { VersionInfo } from "./types.js";
 
 export interface RegistryOptions {
   registry?: string;
@@ -6,10 +8,10 @@ export interface RegistryOptions {
 }
 
 export interface Registry {
-  /** The `latest` dist-tag, or null when the package doesn't exist. */
-  latest(name: string): Promise<string | null>;
-  /** Every published, non-deprecated version; empty when the package doesn't exist. */
-  versions(name: string): Promise<string[]>;
+  /** The version behind the `latest` dist-tag, or null when the package doesn't exist. */
+  latest(name: string): Promise<VersionInfo | null>;
+  /** Every published version, deprecated ones flagged; empty when the package doesn't exist. */
+  versions(name: string): Promise<VersionInfo[]>;
 }
 
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
@@ -19,7 +21,15 @@ const ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RETRY_AFTER_MS = 30_000;
 
-type Packument = { versions?: Record<string, { deprecated?: string }> };
+interface Manifest {
+  version?: string;
+  repository?: unknown;
+  homepage?: string;
+  engines?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  deprecated?: string;
+}
 
 /**
  * All requests made through one registry share a pause: when it answers 429,
@@ -69,19 +79,39 @@ export function createRegistry({
 
   return {
     async latest(name) {
-      const body = await get<{ version?: string }>(
+      const manifest = await get<Manifest>(
         `/${encode(name)}/latest`,
         "application/json",
       );
-      return body?.version ?? null;
+      return manifest ? toInfo(manifest) : null;
     },
     async versions(name) {
-      const doc = await get<Packument>(`/${encode(name)}`, ABBREVIATED);
-      return Object.entries(doc?.versions ?? {})
-        .filter(([, v]) => !v.deprecated)
-        .map(([version]) => version);
+      const doc = await get<{ versions?: Record<string, Manifest> }>(
+        `/${encode(name)}`,
+        ABBREVIATED,
+      );
+      return Object.values(doc?.versions ?? {})
+        .map(toInfo)
+        .filter((v): v is VersionInfo => v !== null);
     },
   };
+}
+
+// Keeps only what an upgrade decision needs; undefined fields are left out so
+// the cache file stays small.
+function toInfo(m: Manifest): VersionInfo | null {
+  if (!m.version) return null;
+  const info: VersionInfo = { version: m.version };
+  const repository = repositoryUrl(m.repository) ?? repositoryUrl(m.homepage);
+  if (repository) info.repository = repository;
+  if (m.engines?.node) info.engines = { node: m.engines.node };
+  if (m.peerDependencies && Object.keys(m.peerDependencies).length > 0) {
+    info.peerDependencies = m.peerDependencies;
+    if (m.peerDependenciesMeta)
+      info.peerDependenciesMeta = m.peerDependenciesMeta;
+  }
+  if (m.deprecated) info.deprecated = m.deprecated;
+  return info;
 }
 
 // 500 ms, 1 s, 2 s... plus up to 200 ms of jitter so retries don't line up.

@@ -3,16 +3,19 @@ import { expect, test } from "bun:test";
 import {
   checkUpdates,
   memoryCache,
+  type PackageMeta,
   type Target,
   type VersionCache,
 } from "./index.js";
+
+type VersionSpec = string | ({ version: string } & Partial<PackageMeta>);
 
 type Reply = {
   status?: number;
   body?: unknown;
   headers?: Record<string, string>;
   /** Served for the packument request (`/<name>`), used by minor/patch targets. */
-  versions?: string[];
+  versions?: VersionSpec[];
   deprecated?: string[];
 };
 
@@ -38,10 +41,14 @@ function registry(replies: Record<string, Reply | Reply[]>) {
     const body = packument
       ? {
           versions: Object.fromEntries(
-            (reply.versions ?? []).map((v) => [
-              v,
-              reply.deprecated?.includes(v) ? { deprecated: "old" } : {},
-            ]),
+            (reply.versions ?? []).map((v) => {
+              const spec = typeof v === "string" ? { version: v } : v;
+              const deprecated = reply.deprecated?.includes(spec.version);
+              return [
+                spec.version,
+                deprecated ? { ...spec, deprecated: "old" } : spec,
+              ];
+            }),
           ),
         }
       : (reply.body ?? {});
@@ -416,4 +423,58 @@ test("a range that already covers the in-target version is left alone", async ()
   );
   expect(upgraded).toEqual({});
   expect(details[0]?.heldBack).toBe("5.3.0");
+});
+
+test("carries the offered version's metadata, also when served from the cache", async () => {
+  const cache = memoryCache();
+  const replies = {
+    typescript: {
+      body: {
+        version: "5.3.3",
+        engines: { node: ">=14.17" },
+        repository: { url: "git+https://github.com/microsoft/TypeScript.git" },
+        peerDependencies: { foo: "^1.0.0" },
+        description: "not kept",
+      },
+    },
+  };
+  const expected = {
+    version: "5.3.3",
+    engines: { node: ">=14.17" },
+    repository: "https://github.com/microsoft/TypeScript",
+    peerDependencies: { foo: "^1.0.0" },
+  };
+  const first = await run({ typescript: "^5.0.0" }, replies, cache);
+  expect(first.details[0]?.meta).toEqual(expected);
+  const second = await run({ typescript: "^5.0.0" }, replies, cache);
+  expect(second.calls).toEqual([]);
+  expect(second.details[0]?.meta).toEqual(expected);
+});
+
+test("a held-back pick takes its engines from the version list and the repository from latest", async () => {
+  const { details } = await run(
+    { express: "^4.17.0" },
+    {
+      express: {
+        body: {
+          version: "5.3.0",
+          repository: "expressjs/express",
+          engines: { node: ">=18" },
+        },
+        versions: [
+          "4.17.0",
+          { version: "4.21.2", engines: { node: ">=0.10" } },
+          "5.3.0",
+        ],
+      },
+    },
+    memoryCache(),
+    { target: "minor" },
+  );
+  expect(details[0]?.upgradeVersion).toBe("^4.21.2");
+  expect(details[0]?.meta).toEqual({
+    version: "4.21.2",
+    engines: { node: ">=0.10" },
+    repository: "https://github.com/expressjs/express",
+  });
 });

@@ -8,12 +8,18 @@ import {
   prerelease,
   validRange,
 } from "semver";
-import { fileCache, memoryCache, type VersionCache } from "./cache.js";
+import {
+  fileCache,
+  memoryCache,
+  type CacheEntry,
+  type VersionCache,
+} from "./cache.js";
 import {
   createRegistry,
   type Registry,
   type RegistryOptions,
 } from "./registry.js";
+import type { VersionInfo } from "./types.js";
 
 export {
   defaultCacheFile,
@@ -22,6 +28,7 @@ export {
   type CacheEntry,
   type VersionCache,
 } from "./cache.js";
+export type { PackageMeta, VersionInfo } from "./types.js";
 
 /** How far an upgrade may go: anywhere, within the current major, or within the current minor. */
 export type Target = "latest" | "minor" | "patch";
@@ -32,6 +39,8 @@ export interface DependencyInfo {
   latestVersion: string | null;
   upgradeVersion: string | null;
   diffType: "major" | "minor" | "patch" | "none";
+  /** The version being offered (or latest, when nothing is): engines, peers, repository. */
+  meta?: VersionInfo;
   /** With a minor/patch target: the latest version, which lies beyond the target. */
   heldBack?: string;
   error?: string;
@@ -83,11 +92,10 @@ export async function checkUpdates(
       try {
         const cached = cache.get(dep.lookupName);
         const latest = cached
-          ? cached.version
+          ? fromEntry(cached)
           : await registry.latest(dep.lookupName);
         if (cached) cacheHits++;
-        else
-          cache.set(dep.lookupName, { version: latest, checkedAt: Date.now() });
+        else cache.set(dep.lookupName, toEntry(latest));
 
         const info =
           latest === null
@@ -129,6 +137,15 @@ function defaultCache(registry?: string): VersionCache {
   }
 }
 
+function toEntry(info: VersionInfo | null): CacheEntry {
+  if (info === null) return { version: null, checkedAt: Date.now() };
+  const { version, ...meta } = info;
+  return { version, checkedAt: Date.now(), meta };
+}
+
+const fromEntry = (entry: CacheEntry): VersionInfo | null =>
+  entry.version === null ? null : { version: entry.version, ...entry.meta };
+
 interface Dep {
   name: string;
   spec: string; // as written in package.json
@@ -158,21 +175,27 @@ const unchanged = (name: string, currentRange: string): DependencyInfo => ({
 
 async function resolveUpgrade(
   dep: Dep,
-  latest: string,
+  latest: VersionInfo,
   target: Target,
   registry: Registry,
 ): Promise<DependencyInfo> {
-  if (target === "latest" || withinTarget(dep.range, latest, target)) {
+  if (target === "latest" || withinTarget(dep.range, latest.version, target)) {
     return fromVersion(dep, latest);
   }
   // `latest` lies beyond the target, so find the newest version inside it. This
   // is the only path that needs the version list; only these packages pay for it.
   const allowed = targetRange(dep.range, target);
-  const best = allowed
-    ? maxSatisfying(await registry.versions(dep.lookupName), allowed)
-    : null;
-  const info = best ? fromVersion(dep, best) : unchanged(dep.name, dep.spec);
-  return { ...info, latestVersion: latest, heldBack: latest };
+  const versions = allowed ? await registry.versions(dep.lookupName) : [];
+  const candidates = versions
+    .filter((v) => !v.deprecated)
+    .map((v) => v.version);
+  const best = allowed ? maxSatisfying(candidates, allowed) : null;
+  const picked = versions.find((v) => v.version === best);
+  // The version list carries no repository; the latest manifest does.
+  const info = picked
+    ? fromVersion(dep, { repository: latest.repository, ...picked })
+    : { ...unchanged(dep.name, dep.spec), meta: latest };
+  return { ...info, latestVersion: latest.version, heldBack: latest.version };
 }
 
 function withinTarget(range: string, version: string, target: Target) {
@@ -194,22 +217,27 @@ function targetRange(range: string, target: Target): string | null {
   return `>=${min.version} <${ceiling}`;
 }
 
-function fromVersion(dep: Dep, latestVersion: string): DependencyInfo {
-  const diffType = classify(dep.range, latestVersion);
+function fromVersion(dep: Dep, info: VersionInfo): DependencyInfo {
+  const diffType = classify(dep.range, info.version);
   const upgradeVersion =
     diffType === "none"
       ? null
-      : dep.prefix + rewriteRange(dep.range, latestVersion);
+      : dep.prefix + rewriteRange(dep.range, info.version);
   // e.g. "4.x" already covers 4.21.2: a rewrite that changes nothing is no upgrade.
   if (upgradeVersion === null || upgradeVersion === dep.spec) {
-    return { ...unchanged(dep.name, dep.spec), latestVersion };
+    return {
+      ...unchanged(dep.name, dep.spec),
+      latestVersion: info.version,
+      meta: info,
+    };
   }
   return {
     name: dep.name,
     currentRange: dep.spec,
-    latestVersion,
+    latestVersion: info.version,
     upgradeVersion,
     diffType,
+    meta: info,
   };
 }
 

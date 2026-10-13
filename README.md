@@ -31,6 +31,15 @@ fncu --install         # upgrade, then run npm/pnpm/yarn/bun install
 With `--minor` or `--patch`, fncu picks the newest version inside the allowed range and lists the newer
 majors it held back, so you can apply the safe upgrades now and read up on the breaking ones later.
 
+Before you upgrade, fncu tells you what it knows about the new versions, all from the manifests it has
+already downloaded:
+
+- a link to the release notes of every major upgrade
+- a new version that needs a Node your `engines` (or the Node you run) doesn't cover
+- a peer dependency that the upgrade wants but your ranges won't satisfy, e.g. `react-dom` 19 next to
+  `react` 18
+- versions that have been deprecated
+
 `-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`, `1.x` becomes `2.x`), follows `npm:` aliases
 to the real package, leaves `file:`, `workspace:` and git specifiers alone (they aren't sent to the
 registry at all), and tells you which package manager to run `install` with.

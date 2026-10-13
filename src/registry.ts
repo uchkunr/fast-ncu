@@ -1,38 +1,45 @@
 import { setTimeout as sleep } from "node:timers/promises";
 
-export interface LookupOptions {
+export interface RegistryOptions {
   registry?: string;
   fetch?: typeof fetch;
 }
 
+export interface Registry {
+  /** The `latest` dist-tag, or null when the package doesn't exist. */
+  latest(name: string): Promise<string | null>;
+  /** Every published, non-deprecated version; empty when the package doesn't exist. */
+  versions(name: string): Promise<string[]>;
+}
+
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
+// The abbreviated packument: versions and dist-tags without readmes or history.
+const ABBREVIATED = "application/vnd.npm.install-v1+json";
 const ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RETRY_AFTER_MS = 30_000;
 
+type Packument = { versions?: Record<string, { deprecated?: string }> };
+
 /**
- * Returns a function that resolves a package name to its `latest` version
- * (`null` when the package doesn't exist). All lookups made through one
- * instance share a pause: when the registry answers 429, every in-flight
- * worker backs off, not just the one that got the response.
+ * All requests made through one registry share a pause: when it answers 429,
+ * every in-flight worker backs off, not just the one that got the response.
  */
-export function createLookup({
+export function createRegistry({
   registry = DEFAULT_REGISTRY,
   fetch: fetchImpl = fetch,
-}: LookupOptions = {}) {
+}: RegistryOptions = {}): Registry {
   let pausedUntil = 0;
 
-  return async function latestVersion(name: string): Promise<string | null> {
-    const url = `${registry}/${name.replace("/", "%2F")}/latest`;
-
+  async function get<T>(path: string, accept: string): Promise<T | null> {
     for (let attempt = 1; ; attempt++) {
       const wait = pausedUntil - Date.now();
       if (wait > 0) await sleep(wait);
 
       let res: Response;
       try {
-        res = await fetchImpl(url, {
-          headers: { accept: "application/json" },
+        res = await fetchImpl(`${registry}${path}`, {
+          headers: { accept },
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (err) {
@@ -41,10 +48,7 @@ export function createLookup({
         continue;
       }
 
-      if (res.ok) {
-        const body = (await res.json()) as { version?: string };
-        return body.version ?? null;
-      }
+      if (res.ok) return (await res.json()) as T;
       if (res.status === 404) return null;
 
       const retryable = res.status === 429 || res.status >= 500;
@@ -59,6 +63,24 @@ export function createLookup({
         await sleep(delay);
       }
     }
+  }
+
+  const encode = (name: string) => name.replace("/", "%2F");
+
+  return {
+    async latest(name) {
+      const body = await get<{ version?: string }>(
+        `/${encode(name)}/latest`,
+        "application/json",
+      );
+      return body?.version ?? null;
+    },
+    async versions(name) {
+      const doc = await get<Packument>(`/${encode(name)}`, ABBREVIATED);
+      return Object.entries(doc?.versions ?? {})
+        .filter(([, v]) => !v.deprecated)
+        .map(([version]) => version);
+    },
   };
 }
 

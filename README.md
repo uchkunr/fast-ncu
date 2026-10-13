@@ -20,9 +20,16 @@ too. Requires Node.js 20 or newer, or Bun. The package has no runtime dependenci
 ## Usage
 
 ```bash
-fncu      # list available upgrades
-fncu -u   # write them to package.json
+fncu                   # list available upgrades
+fncu -u                # write them to package.json
+fncu -u --minor        # only upgrades that stay within the current major
+fncu --patch           # only patch releases within the current minor
+fncu react react-dom   # only these packages (names may use *, e.g. @types/*)
+fncu --install         # upgrade, then run npm/pnpm/yarn/bun install
 ```
+
+With `--minor` or `--patch`, fncu picks the newest version inside the allowed range and lists the newer
+majors it held back, so you can apply the safe upgrades now and read up on the breaking ones later.
 
 `-u` keeps your range operator (`^6.0.0` becomes `^7.8.5`, `1.x` becomes `2.x`), follows `npm:` aliases
 to the real package, leaves `file:`, `workspace:` and git specifiers alone (they aren't sent to the
@@ -33,7 +40,8 @@ registry at all), and tells you which package manager to run `install` with.
 npm-check-updates downloads each package's packument, the document listing every version ever published.
 For `typescript` that's 8.7 MB, even in the abbreviated format npm clients use. fast-ncu only needs the
 `latest` dist-tag, so it requests `/<name>/latest` instead (4.8 KB), runs 30 of those requests in
-parallel and caches the results for 5 minutes.
+parallel and caches the results for 5 minutes. Only `--minor` and `--patch` need a version list, and only
+for the packages whose latest is a new major.
 
 On the npm-check-updates repository (78 dependencies), a cold run took 0.88 s against 2.75 s for ncu.
 The details are in [How I sped up npm-check-updates by 3x](https://uchkun.io/blog/speeding-up-npm-check-updates).
@@ -43,8 +51,8 @@ The details are in [How I sped up npm-check-updates by 3x](https://uchkun.io/blo
 fast-ncu covers the common case. Use npm-check-updates if you need:
 
 - private registries: only registry.npmjs.org is queried and `.npmrc` isn't read
-- targets other than `latest`, filters or pre-release channels (a pre-release tagged `latest` is skipped
-  unless your range is already on a pre-release)
+- pre-release channels (a pre-release tagged `latest` is skipped unless your range is already on a
+  pre-release), or targets other than latest / current major / current minor
 - workspaces, `peerDependencies` or `optionalDependencies`
 - compound ranges kept intact: `>=1.0.0 <2.0.0`, `1.0.0 - 2.0.0` and `^4.0.0 || ^5.0.0` become
   `^latest` (`^`, `~`, `>=`, exact versions and x-ranges like `1.x` keep their shape)

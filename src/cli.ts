@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { parseArgs } from "node:util";
 import { version } from "../package.json";
-import { checkUpdates, type DependencyInfo } from "./index.js";
+import { selectDependencies } from "./filter.js";
+import { checkUpdates, type DependencyInfo, type Target } from "./index.js";
 
 // The usual rules: NO_COLOR disables, FORCE_COLOR overrides, otherwise only on a TTY.
 const colors =
@@ -22,7 +24,12 @@ const gray = paint(90, 39);
 
 const HELP = `${bold("fncu")}: find newer versions of your dependencies
 
+  fncu [packages...] [options]     names may use *, e.g. @types/* or eslint*
+
   -u, --upgrade    write upgrades to package.json
+      --minor      stay within the current major: no breaking changes
+      --patch      stay within the current minor
+      --install    upgrade, then run the package manager's install
   -v, --version    print version
   -h, --help       print help`;
 
@@ -47,12 +54,16 @@ function fail(message: string): never {
 function parseOptions() {
   try {
     return parseArgs({
+      allowPositionals: true,
       options: {
         upgrade: { type: "boolean", short: "u" },
+        minor: { type: "boolean" },
+        patch: { type: "boolean" },
+        install: { type: "boolean" },
         version: { type: "boolean", short: "v" },
         help: { type: "boolean", short: "h" },
       },
-    }).values;
+    });
   } catch (err) {
     // parseArgs messages are long; the first sentence says what's wrong.
     fail(`${(err as Error).message.split(". ")[0]}. See fncu --help`);
@@ -105,9 +116,15 @@ function printTable(rows: DependencyInfo[]) {
 }
 
 async function main() {
-  const options = parseOptions();
+  const { values: options, positionals: patterns } = parseOptions();
   if (options.help) return console.log(HELP);
   if (options.version) return console.log(version);
+  const target: Target = options.patch
+    ? "patch"
+    : options.minor
+      ? "minor"
+      : "latest";
+  const upgrade = options.upgrade || options.install;
 
   const file = "package.json";
   if (!fs.existsSync(file)) fail("No package.json here");
@@ -120,13 +137,21 @@ async function main() {
     fail(`Bad package.json: ${(err as Error).message}`);
   }
 
-  const deps = { ...manifest.dependencies, ...manifest.devDependencies };
-  if (Object.keys(deps).length === 0) return console.log("No dependencies");
+  const deps = selectDependencies(
+    { ...manifest.dependencies, ...manifest.devDependencies },
+    patterns,
+  );
+  if (Object.keys(deps).length === 0) {
+    if (patterns.length > 0)
+      fail(`No dependency matches ${patterns.join(", ")}`);
+    return console.log("No dependencies");
+  }
 
-  const result = await checkUpdates(deps);
+  const result = await checkUpdates(deps, { target });
   const upgrades = result.details
-    .filter((d) => d.diffType !== "none")
+    .filter((d) => d.upgradeVersion)
     .sort((a, b) => ORDER[a.diffType] - ORDER[b.diffType]);
+  const heldBack = result.details.filter((d) => d.heldBack);
   const failed = result.details.filter((d) => d.error);
   // "not found" is an answer from the registry; the others mean we couldn't ask it.
   const unreachable = failed.filter((d) => d.error !== "not found");
@@ -137,7 +162,7 @@ async function main() {
 
   if (upgrades.length > 0) {
     printTable(upgrades);
-    if (options.upgrade) {
+    if (upgrade) {
       for (const field of DEP_FIELDS) {
         for (const name of Object.keys(manifest[field] ?? {})) {
           if (result.upgraded[name])
@@ -151,11 +176,18 @@ async function main() {
       console.log(`\nRun ${cyan("fncu -u")} to upgrade ${time}`);
     }
   } else if (!allFailed) {
+    const scope = target === "latest" ? "" : ` within --${target}`;
     console.log(
       failed.length > 0
-        ? `No upgrades (${failed.length} not checked) ${time}`
-        : `${green("Up to date")} ${time}`,
+        ? `No upgrades${scope} (${failed.length} not checked) ${time}`
+        : `${green(`Up to date${scope}`)} ${time}`,
     );
+  }
+
+  if (heldBack.length > 0) {
+    const list = heldBack.map((d) => `${d.name} ${d.heldBack}`).join(", ");
+    console.log(`\n${yellow(`Held back by --${target}:`)} ${list}`);
+    console.log(dim(`Run without --${target} to include them.`));
   }
 
   if (failed.length > 0) {
@@ -166,6 +198,23 @@ async function main() {
   if (allFailed) {
     console.error(red("\nNo package could be checked"));
     process.exitCode = 1;
+    return;
+  }
+
+  if (options.install && upgrades.length > 0) {
+    const pm = packageManager();
+    console.log(`\n${cyan(`> ${pm} install`)}\n`);
+    // pm comes from a fixed list, so a shell (needed for npm.cmd & co. on Windows) is safe.
+    const { status, error } = spawnSync(pm, ["install"], {
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    });
+    if (error) {
+      console.error(red(`Couldn't run ${pm} install: ${error.message}`));
+      process.exitCode = 1;
+    } else if (status !== 0) {
+      process.exitCode = status ?? 1;
+    }
   }
 }
 

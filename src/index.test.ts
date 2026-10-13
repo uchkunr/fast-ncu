@@ -1,21 +1,32 @@
 /// <reference types="bun" />
 import { expect, test } from "bun:test";
-import { checkUpdates, memoryCache, type VersionCache } from "./index.js";
+import {
+  checkUpdates,
+  memoryCache,
+  type Target,
+  type VersionCache,
+} from "./index.js";
 
 type Reply = {
   status?: number;
   body?: unknown;
   headers?: Record<string, string>;
+  /** Served for the packument request (`/<name>`), used by minor/patch targets. */
+  versions?: string[];
+  deprecated?: string[];
 };
 
 /** A fake registry: one reply per package, or a sequence whose last reply repeats. */
 function registry(replies: Record<string, Reply | Reply[]>) {
-  const calls: string[] = [];
+  const calls: string[] = []; // "name" for /latest, "name (versions)" for the packument
   const startedAt: Record<string, number[]> = {};
   const fetchImpl = async (input: string | URL | Request) => {
-    const path = new URL(String(input)).pathname; // "/typescript/latest"
-    const name = decodeURIComponent(path.slice(1, -"/latest".length));
-    calls.push(name);
+    const path = new URL(String(input)).pathname; // "/typescript/latest" or "/typescript"
+    const packument = !path.endsWith("/latest");
+    const name = decodeURIComponent(
+      packument ? path.slice(1) : path.slice(1, -"/latest".length),
+    );
+    calls.push(packument ? `${name} (versions)` : name);
     (startedAt[name] ??= []).push(Date.now());
     const script = replies[name];
     const reply = Array.isArray(script)
@@ -24,7 +35,17 @@ function registry(replies: Record<string, Reply | Reply[]>) {
         : script[0]
       : script;
     if (!reply) return new Response("Not found", { status: 404 });
-    return new Response(JSON.stringify(reply.body ?? {}), {
+    const body = packument
+      ? {
+          versions: Object.fromEntries(
+            (reply.versions ?? []).map((v) => [
+              v,
+              reply.deprecated?.includes(v) ? { deprecated: "old" } : {},
+            ]),
+          ),
+        }
+      : (reply.body ?? {});
+    return new Response(JSON.stringify(body), {
       status: reply.status ?? 200,
       headers: { "content-type": "application/json", ...reply.headers },
     });
@@ -33,14 +54,28 @@ function registry(replies: Record<string, Reply | Reply[]>) {
 }
 
 const latest = (version: string): Reply => ({ body: { version } });
+const published = (
+  version: string,
+  versions: string[],
+  deprecated?: string[],
+): Reply => ({
+  body: { version },
+  versions,
+  deprecated,
+});
 
 async function run(
   deps: Record<string, string>,
   replies: Record<string, Reply | Reply[]>,
   cache: VersionCache = memoryCache(),
+  options: { target?: Target } = {},
 ) {
   const reg = registry(replies);
-  const result = await checkUpdates(deps, { cache, fetch: reg.fetch });
+  const result = await checkUpdates(deps, {
+    cache,
+    fetch: reg.fetch,
+    ...options,
+  });
   return { ...result, calls: reg.calls, startedAt: reg.startedAt };
 }
 
@@ -301,4 +336,84 @@ test("follows npm: aliases to the real package and keeps the alias", async () =>
   expect(details.find((d) => d.name === "dbg")?.currentRange).toBe(
     "npm:debug@^3.0.0",
   );
+});
+
+test("--minor stays within the current major and reports what it held back", async () => {
+  const { upgraded, details, calls } = await run(
+    { express: "^4.17.0", lodash: "^4.17.20" },
+    {
+      express: published("5.3.0", [
+        "4.17.0",
+        "4.21.2",
+        "4.22.0-beta.1",
+        "5.0.0",
+        "5.3.0",
+      ]),
+      lodash: latest("4.18.1"),
+    },
+    memoryCache(),
+    { target: "minor" },
+  );
+  expect(upgraded).toEqual({ express: "^4.21.2", lodash: "^4.18.1" });
+  const express = details.find((d) => d.name === "express");
+  expect(express).toMatchObject({
+    latestVersion: "5.3.0",
+    heldBack: "5.3.0",
+    diffType: "minor",
+  });
+  expect(calls).toContain("express (versions)");
+  expect(calls).not.toContain("lodash (versions)"); // latest was already within the major
+});
+
+test("--patch stays within the current minor", async () => {
+  const { upgraded, details } = await run(
+    { a: "~1.4.0" },
+    { a: published("2.0.0", ["1.4.0", "1.4.7", "1.5.0", "2.0.0"]) },
+    memoryCache(),
+    { target: "patch" },
+  );
+  expect(upgraded).toEqual({ a: "~1.4.7" });
+  expect(details[0]).toMatchObject({ diffType: "patch", heldBack: "2.0.0" });
+});
+
+test("a held-back package with nothing newer inside the target is reported, not upgraded", async () => {
+  const { upgraded, details } = await run(
+    { a: "^4.21.2" },
+    { a: published("5.3.0", ["4.21.2", "5.3.0"]) },
+    memoryCache(),
+    { target: "minor" },
+  );
+  expect(upgraded).toEqual({});
+  expect(details[0]).toMatchObject({
+    upgradeVersion: null,
+    latestVersion: "5.3.0",
+    heldBack: "5.3.0",
+  });
+});
+
+test("skips deprecated versions when picking inside the target", async () => {
+  const { upgraded } = await run(
+    { a: "^4.17.0" },
+    {
+      a: published(
+        "5.0.0",
+        ["4.17.0", "4.21.2", "4.21.3", "5.0.0"],
+        ["4.21.3"],
+      ),
+    },
+    memoryCache(),
+    { target: "minor" },
+  );
+  expect(upgraded).toEqual({ a: "^4.21.2" });
+});
+
+test("a range that already covers the in-target version is left alone", async () => {
+  const { upgraded, details } = await run(
+    { a: "4.x" },
+    { a: published("5.3.0", ["4.17.0", "4.21.2", "5.3.0"]) },
+    memoryCache(),
+    { target: "minor" },
+  );
+  expect(upgraded).toEqual({});
+  expect(details[0]?.heldBack).toBe("5.3.0");
 });

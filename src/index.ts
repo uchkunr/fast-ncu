@@ -1,6 +1,19 @@
-import { diff, gte, minVersion, prerelease, validRange } from "semver";
+import {
+  diff,
+  gte,
+  major,
+  maxSatisfying,
+  minVersion,
+  minor,
+  prerelease,
+  validRange,
+} from "semver";
 import { fileCache, memoryCache, type VersionCache } from "./cache.js";
-import { createLookup, type LookupOptions } from "./registry.js";
+import {
+  createRegistry,
+  type Registry,
+  type RegistryOptions,
+} from "./registry.js";
 
 export {
   defaultCacheFile,
@@ -10,12 +23,17 @@ export {
   type VersionCache,
 } from "./cache.js";
 
+/** How far an upgrade may go: anywhere, within the current major, or within the current minor. */
+export type Target = "latest" | "minor" | "patch";
+
 export interface DependencyInfo {
   name: string;
   currentRange: string;
   latestVersion: string | null;
   upgradeVersion: string | null;
   diffType: "major" | "minor" | "patch" | "none";
+  /** With a minor/patch target: the latest version, which lies beyond the target. */
+  heldBack?: string;
   error?: string;
   fromCache?: boolean;
 }
@@ -31,9 +49,11 @@ export interface NCUResult {
   };
 }
 
-export interface CheckOptions extends LookupOptions {
+export interface CheckOptions extends RegistryOptions {
   /** Defaults to the on-disk cache shared by every project on the machine. */
   cache?: VersionCache;
+  /** Defaults to "latest". */
+  target?: Target;
 }
 
 // Measured against the public registry: more parallel requests than this
@@ -46,7 +66,8 @@ export async function checkUpdates(
 ): Promise<NCUResult> {
   const start = Date.now();
   const cache = options.cache ?? defaultCache(options.registry);
-  const latestVersion = createLookup(options);
+  const registry = createRegistry(options);
+  const target = options.target ?? "latest";
   let cacheHits = 0;
 
   const details = await mapLimit(
@@ -59,15 +80,20 @@ export async function checkUpdates(
       const normalized = validRange(dep.range);
       if (!normalized || normalized === "*") return unchanged(name, spec);
 
-      const cached = cache.get(dep.lookupName);
-      if (cached) {
-        cacheHits++;
-        return { ...fromVersion(dep, cached.version), fromCache: true };
-      }
       try {
-        const version = await latestVersion(dep.lookupName);
-        cache.set(dep.lookupName, { version, checkedAt: Date.now() });
-        return fromVersion(dep, version);
+        const cached = cache.get(dep.lookupName);
+        const latest = cached
+          ? cached.version
+          : await registry.latest(dep.lookupName);
+        if (cached) cacheHits++;
+        else
+          cache.set(dep.lookupName, { version: latest, checkedAt: Date.now() });
+
+        const info =
+          latest === null
+            ? { ...unchanged(name, spec), error: "not found" }
+            : await resolveUpgrade(dep, latest, target, registry);
+        return cached ? { ...info, fromCache: true } : info;
       } catch (err) {
         return { ...unchanged(name, spec), error: (err as Error).message };
       }
@@ -130,15 +156,54 @@ const unchanged = (name: string, currentRange: string): DependencyInfo => ({
   diffType: "none",
 });
 
-function fromVersion(dep: Dep, latestVersion: string | null): DependencyInfo {
-  if (latestVersion === null) {
-    return { ...unchanged(dep.name, dep.spec), error: "not found" };
+async function resolveUpgrade(
+  dep: Dep,
+  latest: string,
+  target: Target,
+  registry: Registry,
+): Promise<DependencyInfo> {
+  if (target === "latest" || withinTarget(dep.range, latest, target)) {
+    return fromVersion(dep, latest);
   }
+  // `latest` lies beyond the target, so find the newest version inside it. This
+  // is the only path that needs the version list; only these packages pay for it.
+  const allowed = targetRange(dep.range, target);
+  const best = allowed
+    ? maxSatisfying(await registry.versions(dep.lookupName), allowed)
+    : null;
+  const info = best ? fromVersion(dep, best) : unchanged(dep.name, dep.spec);
+  return { ...info, latestVersion: latest, heldBack: latest };
+}
+
+function withinTarget(range: string, version: string, target: Target) {
+  const min = minVersion(range);
+  if (!min) return true;
+  if (major(version) !== min.major) return false;
+  return target === "minor" || minor(version) === min.minor;
+}
+
+// The versions an upgrade may move within: the current major for `minor`,
+// the current minor for `patch`.
+function targetRange(range: string, target: Target): string | null {
+  const min = minVersion(range);
+  if (!min) return null;
+  const ceiling =
+    target === "minor"
+      ? `${min.major + 1}.0.0-0`
+      : `${min.major}.${min.minor + 1}.0-0`;
+  return `>=${min.version} <${ceiling}`;
+}
+
+function fromVersion(dep: Dep, latestVersion: string): DependencyInfo {
   const diffType = classify(dep.range, latestVersion);
   const upgradeVersion =
     diffType === "none"
       ? null
       : dep.prefix + rewriteRange(dep.range, latestVersion);
+  // e.g. "4.x" already covers 4.21.2: a rewrite that changes nothing is no upgrade.
+  if (upgradeVersion === null || upgradeVersion === dep.spec) {
+    return { ...unchanged(dep.name, dep.spec), latestVersion };
+  }
   return {
     name: dep.name,
     currentRange: dep.spec,

@@ -14,7 +14,8 @@ everyday case: find the latest version of every dependency in `package.json` and
 npm install -g fast-ncu
 ```
 
-This gives you `fncu` (and the longer `fast-ncu`). Requires Node.js 18 or newer.
+This gives you `fncu` (and the longer `fast-ncu`). `bun install -g fast-ncu` and `npx fast-ncu` work
+too. Requires Node.js 20 or newer, or Bun. The package has no runtime dependencies.
 
 ## Usage
 
@@ -42,9 +43,21 @@ The details are in [How I sped up npm-check-updates by 3x](https://uchkun.io/blo
 fast-ncu covers the common case. Use npm-check-updates if you need:
 
 - private registries: only registry.npmjs.org is queried and `.npmrc` isn't read
-- targets other than `latest`, filters or pre-release channels
+- targets other than `latest`, filters or pre-release channels (a pre-release tagged `latest` is skipped
+  unless your range is already on a pre-release)
 - workspaces, `peerDependencies` or `optionalDependencies`
-- compound ranges kept intact: `>=1.0.0 <2.0.0`, `1.x` and `^4.0.0 || ^5.0.0` collapse to a single version
+- compound ranges kept intact: `>=1.0.0 <2.0.0` and `^4.0.0 || ^5.0.0` collapse to a single bound
+  (`^`, `~`, `>=`, exact versions and x-ranges like `1.x` keep their shape)
+
+## Development
+
+Bun is the toolchain; the published package runs on Node too.
+
+```bash
+bun install
+bun test
+bun run build   # bundles src/ into dist/ for Node and emits type declarations
+```
 
 ## License
 

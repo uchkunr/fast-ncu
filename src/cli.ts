@@ -1,253 +1,141 @@
 #!/usr/bin/env node
 
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs";
+import path from "node:path";
+import { parseArgs } from "node:util";
 import pc from "picocolors";
-import { checkUpdates, DependencyInfo } from "./index.js";
+import { checkUpdates, type DependencyInfo } from "./index.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const HELP = `${pc.bold("fncu")}: find newer versions of your dependencies
 
-function printHelp() {
-  console.log(`
-${pc.bold("fast-ncu")} (${pc.bold("fncu")}) - An extremely fast alternative to npm-check-updates
+  -u, --upgrade    write upgrades to package.json
+  -v, --version    print version
+  -h, --help       print help`;
 
-${pc.bold("Usage:")}
-  fncu [options]
+const DEP_FIELDS = ["dependencies", "devDependencies"] as const;
+const ORDER = { major: 0, minor: 1, patch: 2, none: 3 };
+const COLOR = {
+  major: pc.red,
+  minor: pc.yellow,
+  patch: pc.green,
+  none: pc.gray,
+};
+const LOCKFILES = [
+  ["pnpm-lock.yaml", "pnpm"],
+  ["yarn.lock", "yarn"],
+  ["bun.lock", "bun"],
+  ["bun.lockb", "bun"],
+  ["package-lock.json", "npm"],
+];
 
-${pc.bold("Options:")}
-  -u, --upgrade          Overwrite package.json with upgraded versions
-  --concurrency <num>    Number of concurrent registry requests (default: 15)
-  --no-cache             Disable local caching
-  -v, --version          Show version of fast-ncu / fncu
-  -h, --help             Show help
-`);
+function fail(message: string): never {
+  console.error(pc.red(message));
+  process.exit(1);
 }
 
-function printVersion() {
-  const pkgPath = path.join(__dirname, "../package.json");
+function parseOptions() {
   try {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-    console.log(`v${pkg.version}`);
-  } catch {
-    console.log("v1.0.0");
+    return parseArgs({
+      options: {
+        upgrade: { type: "boolean", short: "u" },
+        version: { type: "boolean", short: "v" },
+        help: { type: "boolean", short: "h" },
+      },
+    }).values;
+  } catch (err) {
+    // parseArgs messages are long; the first sentence says what's wrong.
+    fail(`${(err as Error).message.split(". ")[0]}. See fncu --help`);
   }
 }
 
-function colorizeVersionDiff(
-  current: string,
-  upgrade: string,
-  type: "major" | "minor" | "patch" | "none",
-): string {
-  if (type === "none" || !upgrade) return pc.gray(current);
-
-  // Find where the difference starts to colorize it (like major is red, minor yellow, patch green)
-  if (type === "major") {
-    return `${pc.gray(current)}  →  ${pc.red(upgrade)}`;
-  } else if (type === "minor") {
-    return `${pc.gray(current)}  →  ${pc.yellow(upgrade)}`;
-  } else if (type === "patch") {
-    return `${pc.gray(current)}  →  ${pc.green(upgrade)}`;
-  }
-  return `${pc.gray(current)}  →  ${upgrade}`;
+function packageManager(): string {
+  const lockfile = LOCKFILES.find(([file]) => fs.existsSync(file));
+  if (lockfile) return lockfile[1];
+  // e.g. "pnpm/9.12.0 npm/? node/v22.11.0" when run through a package manager
+  const agent = process.env.npm_config_user_agent?.split("/")[0] ?? "";
+  return ["pnpm", "yarn", "bun"].includes(agent) ? agent : "npm";
 }
 
-function detectPackageManager(): string {
-  const cwd = process.cwd();
-  if (fs.existsSync(path.join(cwd, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs.existsSync(path.join(cwd, "yarn.lock"))) return "yarn";
-  if (
-    fs.existsSync(path.join(cwd, "bun.lockb")) ||
-    fs.existsSync(path.join(cwd, "bun.lock"))
-  )
-    return "bun";
-  if (fs.existsSync(path.join(cwd, "package-lock.json"))) return "npm";
-
-  // Check user agent if lockfiles are missing (e.g. running global/npx)
-  const userAgent = process.env.npm_config_user_agent || "";
-  if (userAgent.includes("pnpm")) return "pnpm";
-  if (userAgent.includes("yarn")) return "yarn";
-  if (userAgent.includes("bun")) return "bun";
-
-  return "npm";
-}
-
-function printUpgradesTable(upgradedDetails: DependencyInfo[]) {
-  // Sort: major updates first, then minor, then patch
-  const typeOrder = { major: 0, minor: 1, patch: 2, none: 3 };
-  upgradedDetails.sort((a, b) => typeOrder[a.diffType] - typeOrder[b.diffType]);
-
-  const headers = ["Package", "Current", "Latest", "Type"];
-
-  // Calculate max lengths for each column
-  const nameLen = Math.max(
-    ...upgradedDetails.map((d) => d.name.length),
-    headers[0].length,
+function printTable(rows: DependencyInfo[]) {
+  const header = ["Package", "Current", "Latest", "Type"];
+  const cells = rows.map((d) => [
+    d.name,
+    d.currentRange,
+    d.upgradeVersion ?? "",
+    d.diffType,
+  ]);
+  const widths = header.map((h, i) =>
+    Math.max(h.length, ...cells.map((c) => c[i].length)),
   );
-  const currentLen = Math.max(
-    ...upgradedDetails.map((d) => d.currentRange.length),
-    headers[1].length,
-  );
-  const upgradeLen = Math.max(
-    ...upgradedDetails.map((d) => d.upgradeVersion || "").map((v) => v.length),
-    headers[2].length,
-  );
-  const typeLen = Math.max(
-    ...upgradedDetails.map((d) => d.diffType.length),
-    headers[3].length,
-  );
+  const border = (left: string, mid: string, right: string) =>
+    left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right;
+  const line = (cols: string[], paint: (text: string, i: number) => string) =>
+    `│${cols.map((c, i) => ` ${paint(c.padEnd(widths[i]), i)} `).join("│")}│`;
 
-  // Draw borders
-  const topBorder = `┌─${"─".repeat(nameLen)}─┬─${"─".repeat(currentLen)}─┬─${"─".repeat(upgradeLen)}─┬─${"─".repeat(typeLen)}─┐`;
-  const midBorder = `├─${"─".repeat(nameLen)}─┼─${"─".repeat(currentLen)}─┼─${"─".repeat(upgradeLen)}─┼─${"─".repeat(typeLen)}─┤`;
-  const botBorder = `└─${"─".repeat(nameLen)}─┴─${"─".repeat(currentLen)}─┴─${"─".repeat(upgradeLen)}─┴─${"─".repeat(typeLen)}─┘`;
-
-  // Print Header
-  console.log(topBorder);
-  console.log(
-    `│ ${pc.bold(headers[0].padEnd(nameLen))} │ ${pc.bold(headers[1].padEnd(currentLen))} │ ${pc.bold(headers[2].padEnd(upgradeLen))} │ ${pc.bold(headers[3].padEnd(typeLen))} │`,
-  );
-  console.log(midBorder);
-
-  // Print Rows
-  for (const info of upgradedDetails) {
-    const rawName = info.name.padEnd(nameLen);
-    const rawCurrent = info.currentRange.padEnd(currentLen);
-    const rawUpgrade = (info.upgradeVersion || "").padEnd(upgradeLen);
-    const rawType = info.diffType.padEnd(typeLen);
-
-    const nameCol = pc.cyan(rawName);
-    const currentCol = pc.gray(rawCurrent);
-
-    let upgradeCol = rawUpgrade;
-    if (info.diffType === "major") upgradeCol = pc.red(rawUpgrade);
-    else if (info.diffType === "minor") upgradeCol = pc.yellow(rawUpgrade);
-    else if (info.diffType === "patch") upgradeCol = pc.green(rawUpgrade);
-
-    let typeCol = rawType;
-    if (info.diffType === "major") typeCol = pc.red(rawType);
-    else if (info.diffType === "minor") typeCol = pc.yellow(rawType);
-    else if (info.diffType === "patch") typeCol = pc.green(rawType);
-
-    console.log(`│ ${nameCol} │ ${currentCol} │ ${upgradeCol} │ ${typeCol} │`);
-  }
-  console.log(botBorder);
+  console.log(border("┌", "┬", "┐"));
+  console.log(line(header, pc.bold));
+  console.log(border("├", "┼", "┤"));
+  rows.forEach((d, r) => {
+    const paints = [pc.cyan, pc.gray, COLOR[d.diffType], COLOR[d.diffType]];
+    console.log(line(cells[r], (text, i) => paints[i](text)));
+  });
+  console.log(border("└", "┴", "┘"));
 }
 
 async function main() {
-  const args = process.argv.slice(2);
+  const options = parseOptions();
 
-  if (args.includes("-h") || args.includes("--help")) {
-    printHelp();
-    return;
+  if (options.help) return console.log(HELP);
+  if (options.version) {
+    const pkgUrl = new URL("../package.json", import.meta.url);
+    return console.log(JSON.parse(fs.readFileSync(pkgUrl, "utf8")).version);
   }
 
-  if (args.includes("-v") || args.includes("--version")) {
-    printVersion();
-    return;
-  }
-
-  const shouldUpgrade = args.includes("-u") || args.includes("--upgrade");
-  const useCache = !args.includes("--no-cache");
-
-  let concurrency = 15;
-  const concurrencyIdx = args.indexOf("--concurrency");
-  if (concurrencyIdx !== -1 && args[concurrencyIdx + 1]) {
-    const val = parseInt(args[concurrencyIdx + 1], 10);
-    if (!isNaN(val) && val > 0) {
-      concurrency = val;
-    }
-  }
-
-  const pkgJsonPath = path.resolve(process.cwd(), "package.json");
-
-  if (!fs.existsSync(pkgJsonPath)) {
-    console.error(
-      pc.red("Error: package.json not found in the current directory."),
-    );
-    process.exit(1);
-  }
-
-  let pkgContent: any;
+  const file = path.resolve("package.json");
+  let pkg: Record<string, Record<string, string> | undefined>;
   try {
-    pkgContent = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
-  } catch (err: any) {
-    console.error(pc.red(`Error parsing package.json: ${err.message}`));
-    process.exit(1);
+    pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    const { code, message } = err as NodeJS.ErrnoException;
+    fail(
+      code === "ENOENT"
+        ? "No package.json here"
+        : `Bad package.json: ${message}`,
+    );
   }
 
-  const dependencies = {
-    ...(pkgContent.dependencies || {}),
-    ...(pkgContent.devDependencies || {}),
-  };
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  if (Object.keys(deps).length === 0) return console.log("No dependencies");
 
-  if (Object.keys(dependencies).length === 0) {
-    console.log(pc.green("No dependencies found in package.json."));
-    return;
-  }
+  const result = await checkUpdates(deps);
+  const upgrades = result.details
+    .filter((d) => d.diffType !== "none")
+    .sort((a, b) => ORDER[a.diffType] - ORDER[b.diffType]);
+  const failed = result.details.filter((d) => d.error);
+  const time = pc.dim(`${result.stats.timeMs}ms`);
 
-  const result = await checkUpdates(dependencies, {
-    concurrency,
-    useCache,
-  });
-
-  const upgradedDetails = result.details.filter((d) => d.diffType !== "none");
-  const errorDetails = result.details.filter((d) => d.error);
-
-  if (upgradedDetails.length === 0) {
-    console.log(pc.green("Up to date!"));
+  if (upgrades.length === 0) {
+    console.log(`${pc.green("Up to date")} ${time}`);
   } else {
-    // Print table of upgrades
-    printUpgradesTable(upgradedDetails);
-
-    if (shouldUpgrade) {
-      // Overwrite package.json with updated versions
-      if (pkgContent.dependencies) {
-        for (const name of Object.keys(pkgContent.dependencies)) {
-          if (result.upgraded[name]) {
-            pkgContent.dependencies[name] = result.upgraded[name];
-          }
+    printTable(upgrades);
+    if (options.upgrade) {
+      for (const field of DEP_FIELDS) {
+        for (const name of Object.keys(pkg[field] ?? {})) {
+          if (result.upgraded[name]) pkg[field]![name] = result.upgraded[name];
         }
       }
-
-      if (pkgContent.devDependencies) {
-        for (const name of Object.keys(pkgContent.devDependencies)) {
-          if (result.upgraded[name]) {
-            pkgContent.devDependencies[name] = result.upgraded[name];
-          }
-        }
-      }
-
-      fs.writeFileSync(
-        pkgJsonPath,
-        JSON.stringify(pkgContent, null, 2) + "\n",
-        "utf8",
-      );
-      const pm = detectPackageManager();
-      console.log(
-        "\n" +
-          pc.green(
-            `Upgraded package.json successfully! Run ${pc.cyan(`${pm} install`)} to apply changes.`,
-          ),
-      );
+      fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+      const install = pc.cyan(`${packageManager()} install`);
+      console.log(`\n${pc.green("Updated.")} Run ${install} ${time}`);
     } else {
-      console.log(
-        "\n" + "💡 Run " + pc.cyan("fncu -u") + " to upgrade package.json.",
-      );
+      console.log(`\nRun ${pc.cyan("fncu -u")} to upgrade ${time}`);
     }
-    console.log(pc.dim("⚡ Done in " + result.stats.timeMs + "ms"));
   }
 
-  if (upgradedDetails.length === 0 && errorDetails.length > 0) {
-    console.log("\n" + pc.yellow("Warnings/Errors:"));
-    for (const info of errorDetails) {
-      console.log(`  ${pc.red(info.name)}: ${pc.dim(info.error)}`);
-    }
+  if (failed.length > 0) {
+    console.log(pc.yellow(`\nCouldn't check ${failed.length}:`));
+    for (const d of failed) console.log(`  ${d.name} ${pc.dim(d.error!)}`);
   }
 }
 
-main().catch((err) => {
-  console.error(pc.red(`Fatal Error: ${err.message}`));
-  process.exit(1);
-});
+main().catch((err: Error) => fail(err.message));

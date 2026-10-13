@@ -1,14 +1,14 @@
-import semver from 'semver';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import semver from "semver";
 
 export interface DependencyInfo {
   name: string;
   currentRange: string;
   latestVersion: string | null;
   upgradeVersion: string | null;
-  diffType: 'major' | 'minor' | 'patch' | 'none';
+  diffType: "major" | "minor" | "patch" | "none";
   error?: string;
   fromCache?: boolean;
 }
@@ -24,211 +24,155 @@ export interface NCUResult {
   };
 }
 
-interface CacheData {
-  timestamp: number;
-  versions: Record<string, string>;
-}
+type Cache = Record<string, { version: string; checkedAt: number }>;
 
-const CACHE_FILE = path.join(os.tmpdir(), 'fast-ncu-cache.json');
-const DEFAULT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const REGISTRY = "https://registry.npmjs.org";
+const CONCURRENCY = 30; // past ~30 parallel requests there's no measurable gain
+const REQUEST_TIMEOUT_MS = 10_000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_FILE = path.join(os.tmpdir(), "fast-ncu-cache-v2.json");
 
-function loadCache(ttl: number): Record<string, string> {
+function readCache(): Cache {
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const content = fs.readFileSync(CACHE_FILE, 'utf8');
-      const data = JSON.parse(content) as CacheData;
-      if (Date.now() - data.timestamp < ttl) {
-        return data.versions || {};
-      }
-    }
-  } catch {}
-  return {};
-}
-
-function saveCache(versions: Record<string, string>) {
-  try {
-    const data: CacheData = {
-      timestamp: Date.now(),
-      versions
-    };
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf8');
-  } catch {}
-}
-
-// Zero-dependency concurrency limiter helper
-async function pLimit<T>(concurrency: number, tasks: (() => Promise<T>)[]): Promise<T[]> {
-  const results: T[] = [];
-  const executing: Promise<void>[] = [];
-  let i = 0;
-  
-  async function runTask(taskIndex: number) {
-    results[taskIndex] = await tasks[taskIndex]();
+    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+  } catch {
+    return {};
   }
+}
 
-  const enqueue = async (): Promise<void> => {
-    if (i === tasks.length) return;
-    const currentIdx = i++;
-    const promise = runTask(currentIdx).then(() => {
-      executing.splice(executing.indexOf(promise), 1);
-    });
-    executing.push(promise);
-    if (executing.length >= concurrency) {
-      await Promise.race(executing);
+// Each entry carries its own timestamp, so an old entry expires on time even
+// when newer ones are written next to it. Expired entries are dropped on write.
+function writeCache(cache: Cache) {
+  const now = Date.now();
+  const fresh = Object.entries(cache).filter(
+    ([, e]) => now - e.checkedAt < CACHE_TTL_MS,
+  );
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(Object.fromEntries(fresh)));
+  } catch {
+    // The cache is an optimisation; failing to write it is not an error.
+  }
+}
+
+// Runs fn over items with at most `limit` calls in flight, keeping input order.
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
     }
-    await enqueue();
   };
-
-  await enqueue();
-  await Promise.all(executing);
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
   return results;
 }
 
-function preservePrefix(range: string, latestVersion: string): string {
-  if (range === '*') return '*';
-  const match = range.match(/^([~^>=\s]+)/);
-  const prefix = match ? match[1] : '';
-  return `${prefix}${latestVersion}`;
-}
-
-function getDiffType(currentRange: string, latest: string): 'major' | 'minor' | 'patch' | 'none' {
+function getDiffType(
+  range: string,
+  latest: string,
+): DependencyInfo["diffType"] {
   try {
-    const minVer = semver.minVersion(currentRange);
-    if (!minVer) return 'none';
-    
-    if (semver.eq(minVer.version, latest)) return 'none';
-    if (semver.gt(minVer.version, latest)) return 'none';
-
-    const diff = semver.diff(minVer.version, latest);
-    if (diff === 'major' || diff === 'premajor') return 'major';
-    if (diff === 'minor' || diff === 'preminor') return 'minor';
-    if (diff === 'patch' || diff === 'prepatch' || diff === 'prerelease') return 'patch';
-    return 'none';
+    const min = semver.minVersion(range);
+    if (!min || semver.gte(min, latest)) return "none";
+    const diff = semver.diff(min, latest);
+    if (diff === "major" || diff === "premajor") return "major";
+    if (diff === "minor" || diff === "preminor") return "minor";
+    return "patch";
   } catch {
-    return 'none';
+    return "none"; // not a semver range: file:, workspace:, git URLs, npm: aliases
   }
 }
 
-// Fetch the latest version from npm registry
+// Keeps the range operator: ^1.2.0 -> ^2.0.0, ~1.2.0 -> ~1.3.0.
+function withPrefix(range: string, version: string): string {
+  if (range === "*") return "*";
+  return (range.match(/^[~^>=\s]+/)?.[0] ?? "") + version;
+}
+
+function describe(
+  name: string,
+  currentRange: string,
+  latestVersion: string | null,
+): DependencyInfo {
+  const diffType = latestVersion
+    ? getDiffType(currentRange, latestVersion)
+    : "none";
+  const upgradeVersion =
+    latestVersion && diffType !== "none"
+      ? withPrefix(currentRange, latestVersion)
+      : null;
+  return { name, currentRange, latestVersion, upgradeVersion, diffType };
+}
+
 async function fetchLatestVersion(name: string): Promise<string | null> {
-  const encodedName = name.startsWith('@') 
-    ? `@${encodeURIComponent(name.substring(1))}` 
-    : encodeURIComponent(name);
-  const url = `https://registry.npmjs.org/${encodedName}/latest`;
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json'
-      }
-    });
-
-    if (!response.ok) {
-      if (response.status === 404) return null;
-      throw new Error(`Registry responded with status ${response.status}`);
-    }
-
-    const data = (await response.json()) as { version?: string };
-    return data.version || null;
-  } catch (err: any) {
-    throw new Error(`Failed to fetch: ${err.message}`);
-  }
+  const res = await fetch(`${REGISTRY}/${name.replace("/", "%2F")}/latest`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return ((await res.json()) as { version?: string }).version ?? null;
 }
 
+// `useCache: false` is for tests that mock the registry.
 export async function checkUpdates(
   dependencies: Record<string, string>,
-  options: {
-    concurrency?: number;
-    useCache?: boolean;
-    cacheTtl?: number;
-  } = {}
+  { useCache = true }: { useCache?: boolean } = {},
 ): Promise<NCUResult> {
-  const startTime = Date.now();
-  const concurrency = options.concurrency ?? 15;
-  const useCache = options.useCache ?? true;
-  const cacheTtl = options.cacheTtl ?? DEFAULT_CACHE_TTL;
-
-  const cache = useCache ? loadCache(cacheTtl) : {};
+  const start = Date.now();
+  const cache = useCache ? readCache() : {};
   let cacheHits = 0;
-  const newVersionsToCache: Record<string, string> = { ...cache };
+  let cacheChanged = false;
 
-  const depNames = Object.keys(dependencies);
-  
-  const tasks = depNames.map((name) => async (): Promise<DependencyInfo> => {
-    const currentRange = dependencies[name];
-    
-    // Check cache first
-    if (useCache && cache[name]) {
-      cacheHits++;
-      const latest = cache[name];
-      const diffType = getDiffType(currentRange, latest);
-      const upgradeVersion = diffType !== 'none' ? preservePrefix(currentRange, latest) : null;
-      return {
-        name,
-        currentRange,
-        latestVersion: latest,
-        upgradeVersion,
-        diffType,
-        fromCache: true
-      };
-    }
-
-    try {
-      const latest = await fetchLatestVersion(name);
-      if (!latest) {
-        return { name, currentRange, latestVersion: null, upgradeVersion: null, diffType: 'none', error: 'Not found in registry' };
+  const details = await mapLimit(
+    Object.entries(dependencies),
+    CONCURRENCY,
+    async ([name, range]): Promise<DependencyInfo> => {
+      // file:, workspace:, git and npm: specifiers aren't registry versions:
+      // don't look them up (and don't send local package names to the registry).
+      if (!semver.validRange(range)) return describe(name, range, null);
+      const cached = cache[name];
+      if (cached && Date.now() - cached.checkedAt < CACHE_TTL_MS) {
+        cacheHits++;
+        return { ...describe(name, range, cached.version), fromCache: true };
       }
-      
-      const diffType = getDiffType(currentRange, latest);
-      const upgradeVersion = diffType !== 'none' ? preservePrefix(currentRange, latest) : null;
-
-      if (useCache) {
-        newVersionsToCache[name] = latest;
+      try {
+        const latest = await fetchLatestVersion(name);
+        if (!latest)
+          return { ...describe(name, range, null), error: "not found" };
+        cache[name] = { version: latest, checkedAt: Date.now() };
+        cacheChanged = true;
+        return describe(name, range, latest);
+      } catch (err) {
+        return {
+          ...describe(name, range, null),
+          error: (err as Error).message,
+        };
       }
+    },
+  );
 
-      return {
-        name,
-        currentRange,
-        latestVersion: latest,
-        upgradeVersion,
-        diffType
-      };
-    } catch (err: any) {
-      return {
-        name,
-        currentRange,
-        latestVersion: null,
-        upgradeVersion: null,
-        diffType: 'none',
-        error: err.message
-      };
-    }
-  });
-
-  const details = await pLimit(concurrency, tasks);
-  
-  // Save updated cache if we fetched new packages
-  if (useCache && Object.keys(newVersionsToCache).length > Object.keys(cache).length) {
-    saveCache(newVersionsToCache);
-  }
+  if (useCache && cacheChanged) writeCache(cache);
 
   const upgraded: Record<string, string> = {};
-  let upgradedCount = 0;
-
-  for (const info of details) {
-    if (info.upgradeVersion) {
-      upgraded[info.name] = info.upgradeVersion;
-      upgradedCount++;
-    }
-  }
+  for (const d of details)
+    if (d.upgradeVersion) upgraded[d.name] = d.upgradeVersion;
 
   return {
     upgraded,
     details,
     stats: {
-      total: depNames.length,
-      upgradedCount,
-      timeMs: Date.now() - startTime,
-      cacheHits
-    }
+      total: details.length,
+      upgradedCount: Object.keys(upgraded).length,
+      timeMs: Date.now() - start,
+      cacheHits,
+    },
   };
 }

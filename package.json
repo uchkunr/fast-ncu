@@ -8,6 +8,19 @@
     "fast-ncu": "dist/cli.js",
     "fncu": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "!dist/__tests__"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uchkunr/fast-ncu.git"
+  },
+  "homepage": "https://github.com/uchkunr/fast-ncu#readme",
+  "bugs": "https://github.com/uchkunr/fast-ncu/issues",
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
